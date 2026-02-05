@@ -91,7 +91,7 @@ MAX_FRAMES: int = 961
 
 #: Snapshot version key - change this to invalidate GPU memory snapshot cache.
 #: Increment when model loading code changes to force new snapshot creation.
-SNAPSHOT_KEY: str = "v2-h100-gpu"
+SNAPSHOT_KEY: str = "v3-h100-warmup"
 
 # =============================================================================
 # Modal Application Configuration
@@ -262,11 +262,15 @@ def download_model() -> str:
         str(OUTPUTS_DIR): outputs_volume,
     },
     gpu="H100",
-    timeout=60 * 60,  # 60 minutes for long video generation
+    # Timeout configuration per Modal docs:
+    # - startup_timeout: For model loading during @modal.enter(snap=True)
+    # - timeout: For actual inference requests
+    startup_timeout=600,  # 10 minutes for model loading + snapshot creation
+    timeout=30 * 60,  # 30 minutes max per video generation request
     scaledown_window=15 * 60,
     secrets=[modal.Secret.from_name("huggingface-token")],
-    # GPU-only memory snapshot for faster cold starts
-    # Skip CPU snapshot phase - directly snapshot GPU state
+    # GPU memory snapshot for 10x faster cold starts
+    # Both flags required per Modal docs for full GPU state capture
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
 )
@@ -417,6 +421,42 @@ class LingBotWorld:
         )
 
         logger.info("Pipeline loaded successfully!")
+
+        # Warmup pass to compile CUDA kernels and pre-allocate memory
+        # This is critical for GPU snapshots - kernels must be compiled before snapshot
+        logger.info("Running warmup pass to compile CUDA kernels...")
+        try:
+            from PIL import Image
+
+            # Create a small dummy image for warmup
+            warmup_img = Image.new("RGB", (512, 512), color=(128, 128, 128))
+
+            # Run minimal inference to compile kernels
+            _ = self.pipeline.generate(
+                input_prompt="warmup test",
+                img=warmup_img,
+                action_path=None,
+                max_area=480 * 480,  # Small area for fast warmup
+                frame_num=17,  # Minimum frames (4n+1)
+                shift=3.0,
+                sampling_steps=2,  # Minimal steps for warmup
+                guide_scale=5.0,
+                seed=42,
+            )
+
+            # Clear CUDA cache after warmup
+            torch.cuda.empty_cache()
+            logger.info("Warmup complete - CUDA kernels compiled")
+            logger.info(
+                f"GPU Memory after warmup: "
+                f"{torch.cuda.memory_allocated(0) / 1e9:.2f} GB allocated, "
+                f"{torch.cuda.memory_reserved(0) / 1e9:.2f} GB reserved"
+            )
+        except Exception as e:
+            logger.warning(f"Warmup failed (non-fatal): {e}")
+            # Warmup failure is non-fatal - model is still loaded
+
+        logger.info("✓ Model ready for GPU memory snapshot")
 
     @modal.method()
     def generate(
