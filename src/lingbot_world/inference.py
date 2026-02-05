@@ -49,7 +49,7 @@ Generate video via API::
 Notes
 -----
 This module requires the following Modal secrets to be configured:
-- ``hf-secret``: HuggingFace token with read access to the model repository
+- ``huggingface-token``: HuggingFace token with read access to the model repository
 
 See Also
 --------
@@ -117,27 +117,16 @@ outputs_volume = modal.Volume.from_name(
 # =============================================================================
 
 cuda_image = (
-    modal.Image.from_registry(
-        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
-        add_python="3.10",
-    )
-    .entrypoint([])
-    .apt_install(
-        "git",
-        "git-lfs",
-        "ffmpeg",
-        "libsm6",
-        "libxext6",
-        "libgl1-mesa-glx",
-    )
+    modal.Image.debian_slim(python_version="3.10")
+    .apt_install("git", "git-lfs", "ffmpeg", "libsm6", "libxext6", "libgl1-mesa-glx")
     .pip_install(
         "torch>=2.4.0",
         "torchvision>=0.19.0",
         "torchaudio",
-        extra_index_url="https://download.pytorch.org/whl/cu124",
+        index_url="https://download.pytorch.org/whl/cu124",
     )
     .pip_install(
-        "bitsandbytes>=0.43.0",
+        "bitsandbytes>=0.45.0",
         "safetensors>=0.4.0",
         "accelerate>=1.1.1",
         "transformers>=4.49.0",
@@ -153,10 +142,7 @@ cuda_image = (
         "ftfy>=6.2.0",
         "sentencepiece>=0.2.0",
         "huggingface-hub>=0.27.0",
-    )
-    .pip_install(
-        "flash-attn>=2.6.0",
-        extra_options="--no-build-isolation",
+        "hf_transfer>=0.1.0",
     )
     .env(
         {
@@ -166,6 +152,9 @@ cuda_image = (
         }
     )
 )
+
+# Note: flash-attn requires CUDA compilation, skip for now
+# Can be added later with a custom Docker image
 
 #: Extended image with FastAPI dependencies for the web endpoint.
 web_image = cuda_image.pip_install("fastapi[standard]", "python-multipart")
@@ -180,7 +169,7 @@ web_image = cuda_image.pip_install("fastapi[standard]", "python-multipart")
     image=cuda_image,
     volumes={str(MODEL_DIR): model_volume},
     timeout=7200,
-    secrets=[modal.Secret.from_name("hf-secret")],
+    secrets=[modal.Secret.from_name("huggingface-token")],
 )
 def download_model() -> str:
     """
@@ -214,7 +203,7 @@ def download_model() -> str:
 
     Notes
     -----
-    This function requires the ``hf-secret`` Modal secret to be configured
+    This function requires the ``huggingface-token`` Modal secret to be configured
     with a valid HuggingFace token that has read access to the model.
 
     The download is idempotent - running it multiple times will only
@@ -273,10 +262,10 @@ def download_model() -> str:
         str(MODEL_DIR): model_volume,
         str(OUTPUTS_DIR): outputs_volume,
     },
-    gpu=modal.gpu.A100(size="80GB"),
+    gpu="A100-80GB",
     timeout=30 * 60,
     scaledown_window=15 * 60,
-    secrets=[modal.Secret.from_name("hf-secret")],
+    secrets=[modal.Secret.from_name("huggingface-token")],
     # GPU memory snapshot for faster cold starts (~10s vs ~90s)
     enable_memory_snapshot=True,
 )
@@ -669,8 +658,8 @@ class LingBotWorld:
 @app.function(
     image=web_image,
     volumes={str(OUTPUTS_DIR): outputs_volume},
-    allow_concurrent_inputs=20,
 )
+@modal.concurrent(max_inputs=20)
 @modal.asgi_app()
 def api():
     r"""
