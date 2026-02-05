@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://framerusercontent.com/images/JvxoX1dx3NhsTcyvloJ8zBAA.svg" alt="DreamFlux Logo" width="120"/>
+<img src="assets/image.png" alt="DreamFlux Logo" width="120"/>
 
 <img src="https://github.com/user-attachments/assets/75ee80ee-ce8c-464a-b056-54707ca88f09" alt="Powered by Modal" width="180"/>
 
