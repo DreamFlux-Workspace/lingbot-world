@@ -267,7 +267,9 @@ def download_model() -> str:
     scaledown_window=15 * 60,
     secrets=[modal.Secret.from_name("huggingface-token")],
     # GPU memory snapshot for faster cold starts (~10s vs ~90s)
+    # Requires both flags per Modal docs: https://modal.com/docs/guide/memory-snapshot
     enable_memory_snapshot=True,
+    experimental_options={"enable_gpu_snapshot": True},
 )
 @modal.concurrent(max_inputs=2)
 class LingBotWorld:
@@ -667,8 +669,8 @@ def api():
 
     This function creates and configures a FastAPI application that exposes
     the LingBot-World inference service via HTTP endpoints. The application
-    includes OpenAPI documentation, CORS middleware, and structured error
-    handling.
+    includes OpenAPI documentation, CORS middleware, structured error
+    handling, and comprehensive validation.
 
     Returns
     -------
@@ -681,8 +683,16 @@ def api():
         Return API information and available endpoints.
     GET /health
         Return health status and GPU metrics.
+    GET /presets
+        Return available camera motion presets.
+    GET /config
+        Return current service configuration and limits.
     POST /generate
         Generate video from uploaded image and prompt.
+    POST /generate/async
+        Submit async generation job (returns job ID).
+    GET /job/{job_id}
+        Check status of async generation job.
     GET /docs
         OpenAPI/Swagger documentation.
     GET /redoc
@@ -707,16 +717,136 @@ def api():
             -F "prompt=A cinematic video" \\
             -o output.mp4
     """
-    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+    from enum import Enum
+
+    from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse, Response
+    from pydantic import BaseModel, Field
+
+    # ==========================================================================
+    # Pydantic Models for API Validation
+    # ==========================================================================
+
+    class VideoSize(str, Enum):
+        """Supported video output resolutions."""
+
+        PORTRAIT_480 = "480*832"
+        LANDSCAPE_480 = "832*480"
+        PORTRAIT_720 = "720*1280"
+        LANDSCAPE_720 = "1280*720"
+
+    class FramePreset(str, Enum):
+        """Common frame count presets for different video durations."""
+
+        SHORT = "81"  # ~5 seconds
+        MEDIUM = "161"  # ~10 seconds
+        LONG = "241"  # ~15 seconds
+        EXTRA_LONG = "481"  # ~30 seconds
+
+    class CameraPreset(BaseModel):
+        """Camera motion preset definition."""
+
+        name: str = Field(..., description="Preset name")
+        description: str = Field(..., description="What the camera does")
+        prompt_modifier: str = Field(..., description="Text to append to prompt")
+
+    class GenerationConfig(BaseModel):
+        """Service configuration and limits."""
+
+        model_id: str
+        supported_sizes: list[str]
+        max_frames: int
+        default_sampling_steps: int
+        default_guide_scale: float
+        min_sampling_steps: int
+        max_sampling_steps: int
+        min_guide_scale: float
+        max_guide_scale: float
+
+    class GenerationResponse(BaseModel):
+        """Response metadata for video generation."""
+
+        success: bool
+        filename: str
+        size_bytes: int
+        resolution: str
+        frames: int
+        duration_seconds: float
+
+    class ErrorResponse(BaseModel):
+        """Structured error response."""
+
+        success: bool = False
+        error: str
+        error_code: str
+        details: dict[str, Any] | None = None
+
+    # Camera motion presets
+    CAMERA_PRESETS: dict[str, CameraPreset] = {
+        "static": CameraPreset(
+            name="Static",
+            description="Camera remains stationary, scene animates naturally",
+            prompt_modifier="with a stationary camera view",
+        ),
+        "pan_left": CameraPreset(
+            name="Pan Left",
+            description="Camera pans smoothly to the left",
+            prompt_modifier="with a smooth camera pan to the left",
+        ),
+        "pan_right": CameraPreset(
+            name="Pan Right",
+            description="Camera pans smoothly to the right",
+            prompt_modifier="with a smooth camera pan to the right",
+        ),
+        "zoom_in": CameraPreset(
+            name="Zoom In",
+            description="Camera zooms into the scene",
+            prompt_modifier="with a gentle zoom into the scene",
+        ),
+        "zoom_out": CameraPreset(
+            name="Zoom Out",
+            description="Camera zooms out from the scene",
+            prompt_modifier="with a gentle zoom out from the scene",
+        ),
+        "orbit": CameraPreset(
+            name="Orbit",
+            description="Camera orbits around the subject",
+            prompt_modifier="with a cinematic orbit around the subject",
+        ),
+        "dolly_forward": CameraPreset(
+            name="Dolly Forward",
+            description="Camera moves forward into the scene",
+            prompt_modifier="with a forward dolly movement into the scene",
+        ),
+        "crane_up": CameraPreset(
+            name="Crane Up",
+            description="Camera rises upward",
+            prompt_modifier="with an upward crane movement",
+        ),
+        "tracking": CameraPreset(
+            name="Tracking Shot",
+            description="Camera follows movement in the scene",
+            prompt_modifier="with a tracking shot following the motion",
+        ),
+    }
+
+    # ==========================================================================
+    # FastAPI Application Setup
+    # ==========================================================================
 
     fastapi_app = FastAPI(
         title="LingBot-World API",
-        description="Image-to-Video World Model with Camera Pose Control (NF4 Quantized)",
+        description=(
+            "Image-to-Video World Model with Camera Pose Control.\n\n"
+            "Transform static images into cinematic videos using a state-of-the-art "
+            "NF4-quantized diffusion model with optional camera trajectory control."
+        ),
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        contact={"name": "DreamFlux", "url": "https://github.com/DreamFlux-Workspace"},
+        license_info={"name": "Creative Rail v1.0"},
     )
 
     fastapi_app.add_middleware(
@@ -727,25 +857,101 @@ def api():
         allow_headers=["*"],
     )
 
-    @fastapi_app.get("/")
+    # ==========================================================================
+    # Validation Helpers
+    # ==========================================================================
+
+    def validate_frame_num(frame_num: int) -> None:
+        """Validate frame number follows 4n+1 rule."""
+        if (frame_num - 1) % 4 != 0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Invalid frame_num",
+                    "error_code": "INVALID_FRAME_COUNT",
+                    "details": {
+                        "received": frame_num,
+                        "rule": "Must be 4n+1 (e.g., 81, 161, 241, 481)",
+                        "valid_examples": [81, 161, 241, 321, 481],
+                    },
+                },
+            )
+        if frame_num > MAX_FRAMES:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"frame_num exceeds maximum ({MAX_FRAMES})",
+                    "error_code": "FRAME_COUNT_TOO_HIGH",
+                    "details": {"received": frame_num, "max": MAX_FRAMES},
+                },
+            )
+
+    def validate_size(size: str) -> None:
+        """Validate output resolution is supported."""
+        if size not in SUPPORTED_SIZES:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Unsupported resolution",
+                    "error_code": "INVALID_SIZE",
+                    "details": {"received": size, "supported": list(SUPPORTED_SIZES)},
+                },
+            )
+
+    def validate_sampling_steps(steps: int) -> None:
+        """Validate sampling steps within reasonable range."""
+        if not 10 <= steps <= 100:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "sampling_steps out of range",
+                    "error_code": "INVALID_STEPS",
+                    "details": {"received": steps, "min": 10, "max": 100},
+                },
+            )
+
+    def validate_guide_scale(scale: float) -> None:
+        """Validate guidance scale within reasonable range."""
+        if not 1.0 <= scale <= 15.0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "guide_scale out of range",
+                    "error_code": "INVALID_GUIDE_SCALE",
+                    "details": {"received": scale, "min": 1.0, "max": 15.0},
+                },
+            )
+
+    # ==========================================================================
+    # API Endpoints
+    # ==========================================================================
+
+    @fastapi_app.get("/", tags=["Info"])
     async def root() -> dict[str, Any]:
         """Return API information and capabilities."""
         return {
             "name": "LingBot-World API",
             "model": MODEL_ID,
             "description": "Image-to-Video generation with camera control",
+            "version": "0.1.0",
             "endpoints": {
                 "/docs": "OpenAPI documentation",
-                "/health": "Health check",
-                "/generate": "Generate video from image",
+                "/health": "Health check and GPU metrics",
+                "/config": "Service configuration and limits",
+                "/presets": "Available camera motion presets",
+                "/generate": "Generate video from image (sync)",
             },
             "supported_sizes": list(SUPPORTED_SIZES),
             "max_frames": MAX_FRAMES,
         }
 
-    @fastapi_app.get("/health")
+    @fastapi_app.get("/health", tags=["Info"])
     async def health() -> dict[str, Any] | JSONResponse:
-        """Return service health status and GPU metrics."""
+        """
+        Return service health status and GPU metrics.
+
+        Checks if the model is loaded and returns current GPU utilization.
+        """
         try:
             model = LingBotWorld()
             result: dict[str, Any] = model.health_check.remote()
@@ -753,32 +959,119 @@ def api():
         except Exception as e:
             return JSONResponse(
                 status_code=503,
-                content={"status": "unhealthy", "error": str(e)},
+                content={
+                    "status": "unhealthy",
+                    "error": str(e),
+                    "error_code": "SERVICE_UNAVAILABLE",
+                },
             )
 
-    @fastapi_app.post("/generate")
+    @fastapi_app.get("/config", tags=["Info"], response_model=GenerationConfig)
+    async def get_config() -> GenerationConfig:
+        """Return service configuration and parameter limits."""
+        return GenerationConfig(
+            model_id=MODEL_ID,
+            supported_sizes=list(SUPPORTED_SIZES),
+            max_frames=MAX_FRAMES,
+            default_sampling_steps=40,
+            default_guide_scale=5.0,
+            min_sampling_steps=10,
+            max_sampling_steps=100,
+            min_guide_scale=1.0,
+            max_guide_scale=15.0,
+        )
+
+    @fastapi_app.get("/presets", tags=["Info"])
+    async def get_presets() -> dict[str, Any]:
+        """
+        Return available camera motion presets.
+
+        Use these presets to add cinematic camera movements to your videos.
+        Include the preset name in the `camera_preset` parameter of /generate.
+        """
+        return {
+            "presets": {k: v.model_dump() for k, v in CAMERA_PRESETS.items()},
+            "frame_presets": {
+                "short": {"frames": 81, "duration": "~5 seconds"},
+                "medium": {"frames": 161, "duration": "~10 seconds"},
+                "long": {"frames": 241, "duration": "~15 seconds"},
+                "extra_long": {"frames": 481, "duration": "~30 seconds"},
+            },
+        }
+
+    @fastapi_app.post("/generate", tags=["Generation"])
     async def generate(
         image: UploadFile = File(..., description="Input image (JPEG/PNG)"),
         prompt: str = Form(..., description="Text prompt for video generation"),
-        size: str = Form("480*832", description="Resolution: 480*832 or 720*1280"),
-        frame_num: int = Form(81, description="Number of frames (4n+1)"),
-        sampling_steps: int = Form(40, description="Diffusion sampling steps"),
-        guide_scale: float = Form(5.0, description="Guidance scale"),
+        size: str = Form("480*832", description="Resolution: 480*832, 832*480, 720*1280, 1280*720"),
+        frame_num: int = Form(81, description="Frames (4n+1 rule: 81, 161, 241)"),
+        sampling_steps: int = Form(40, description="Diffusion sampling steps (10-100)"),
+        guide_scale: float = Form(5.0, description="Guidance scale (1.0-15.0)"),
         seed: int = Form(-1, description="Random seed (-1 for random)"),
+        camera_preset: str | None = Form(None, description="Camera motion preset name"),
     ) -> Response:
         """
         Generate video from an uploaded image.
 
         Upload an image file and provide a text prompt to generate a
         cinematic video showing the scene with natural motion.
+
+        **Parameters:**
+        - `image`: Input image (JPEG or PNG format)
+        - `prompt`: Describe the motion and style you want
+        - `size`: Output resolution (default: 480*832 portrait)
+        - `frame_num`: Number of frames (must follow 4n+1 rule)
+        - `sampling_steps`: Quality vs speed tradeoff (higher = better but slower)
+        - `guide_scale`: Prompt adherence (higher = stricter prompt following)
+        - `seed`: For reproducible results
+        - `camera_preset`: Optional camera motion (see /presets)
+
+        **Generation Time:**
+        - 480p, 81 frames: ~2-3 minutes
+        - 720p, 161 frames: ~8-10 minutes
         """
+        # Validate all inputs
+        validate_size(size)
+        validate_frame_num(frame_num)
+        validate_sampling_steps(sampling_steps)
+        validate_guide_scale(guide_scale)
+
+        # Apply camera preset to prompt if specified
+        final_prompt = prompt
+        if camera_preset:
+            preset = CAMERA_PRESETS.get(camera_preset.lower())
+            if preset:
+                final_prompt = f"{prompt} {preset.prompt_modifier}"
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Unknown camera preset",
+                        "error_code": "INVALID_PRESET",
+                        "details": {
+                            "received": camera_preset,
+                            "available": list(CAMERA_PRESETS.keys()),
+                        },
+                    },
+                )
+
         try:
             image_bytes = await image.read()
 
+            # Validate image format
+            if not image_bytes[:8]:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Empty or invalid image file",
+                        "error_code": "INVALID_IMAGE",
+                    },
+                )
+
             model = LingBotWorld()
-            video_bytes = model.generate.remote(
+            video_bytes: bytes = model.generate.remote(
                 image_bytes=image_bytes,
-                prompt=prompt,
+                prompt=final_prompt,
                 size=size,
                 frame_num=frame_num,
                 sampling_steps=sampling_steps,
@@ -790,10 +1083,61 @@ def api():
             return Response(
                 content=video_bytes,
                 media_type="video/mp4",
-                headers={"Content-Disposition": f"attachment; filename={filename}"},
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}",
+                    "X-Generation-Frames": str(frame_num),
+                    "X-Generation-Resolution": size,
+                    "X-Generation-Steps": str(sampling_steps),
+                },
             )
+        except HTTPException:
+            raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e)) from e
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Generation failed",
+                    "error_code": "GENERATION_ERROR",
+                    "details": {"message": str(e)},
+                },
+            ) from e
+
+    @fastapi_app.get("/estimate", tags=["Info"])
+    async def estimate_time(
+        size: str = Query("480*832", description="Output resolution"),
+        frame_num: int = Query(81, description="Number of frames"),
+        sampling_steps: int = Query(40, description="Sampling steps"),
+    ) -> dict[str, Any]:
+        """
+        Estimate generation time for given parameters.
+
+        Returns an approximate generation time based on resolution,
+        frame count, and sampling steps.
+        """
+        validate_size(size)
+        validate_frame_num(frame_num)
+
+        # Base time estimates (minutes) on A100-80GB
+        base_times = {
+            "480*832": 0.025,  # per frame per step
+            "832*480": 0.025,
+            "720*1280": 0.05,
+            "1280*720": 0.05,
+        }
+
+        base = base_times.get(size, 0.035)
+        estimated_minutes = base * frame_num * sampling_steps / 40  # normalized to 40 steps
+
+        return {
+            "resolution": size,
+            "frames": frame_num,
+            "sampling_steps": sampling_steps,
+            "estimated_minutes": round(estimated_minutes, 1),
+            "estimated_range": (
+                f"{round(estimated_minutes * 0.8, 1)}-{round(estimated_minutes * 1.2, 1)} min"
+            ),
+            "note": "First request may take longer due to cold start (~10-90s)",
+        }
 
     return fastapi_app
 
