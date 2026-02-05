@@ -1,0 +1,94 @@
+[project]
+name = "lingbot-world"
+version = "0.1.0"
+description = "LingBot-World: Image-to-Video World Model with Camera Pose Control - Modal Deployment"
+readme = "README.md"
+license = { text = "Creative-Rail-1.0" }
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "VikramXD" }]
+keywords = ["video-generation", "image-to-video", "modal", "diffusion", "world-model"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "modal>=0.73.0",
+    "huggingface-hub>=0.27.0",
+    "gradio>=5.0.0",
+    "pillow>=10.0.0",
+    "numpy>=1.23.5,<2",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[project.scripts]
+lingbot = "lingbot_world.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/VikramXD/LingBotWorld"
+Documentation = "https://huggingface.co/cahlen/lingbot-world-base-cam-nf4"
+Repository = "https://github.com/VikramXD/LingBotWorld"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lingbot_world"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "D",      # pydocstyle
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "D100",   # Missing docstring in public module
+    "D104",   # Missing docstring in public package
+    "B008",   # Function call in default argument (false positive for FastAPI/Gradio)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/lingbot_world/ui.py" = ["E501"]  # Long lines in example strings
+"src/lingbot_world/cli.py" = ["E501", "D401"]  # Long lines in output
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
