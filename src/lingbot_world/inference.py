@@ -62,18 +62,13 @@ References
 .. [2] Modal Documentation: https://modal.com/docs
 """
 
-from __future__ import annotations
-
 import io
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 import modal
-
-if TYPE_CHECKING:
-    from typing import Any
 
 # =============================================================================
 # Module Constants
@@ -946,7 +941,7 @@ def api():
         }
 
     @fastapi_app.get("/health", tags=["Info"])
-    async def health() -> dict[str, Any] | JSONResponse:
+    async def health() -> Any:
         """
         Return service health status and GPU metrics.
 
