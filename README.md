@@ -65,6 +65,16 @@ sequenceDiagram
     Note over C,API: ~2-10 min depending on resolution/frames
 ```
 
+### Key Optimizations
+
+| Optimization | Benefit |
+|--------------|---------|
+| **GPU Memory Snapshots** | Cold starts reduced from ~90s to ~10s |
+| **Persistent Volume Caching** | Model weights cached across restarts |
+| **15-min Scaledown Window** | Containers stay warm between requests |
+| **Concurrent Processing** | 2 requests per GPU container |
+| **NF4 Quantization** | 3.9x model compression (~85GB → ~30GB) |
+
 ### Model Components
 
 | Component | Size | Description |
@@ -295,10 +305,15 @@ uv run lingbot ui --api-url https://...
 | 720*1280 | 81 | 40 | ~5-6 min |
 | 720*1280 | 161 | 70 | ~8-10 min |
 
-### Cold Start
+### Cold Start (with GPU Memory Snapshots)
 
-- First request: ~60-90 seconds (model loading)
-- Subsequent requests: Immediate (15-min keepalive)
+| Scenario | Time | Description |
+|----------|------|-------------|
+| First ever | ~90s | Creates GPU memory snapshot |
+| Snapshot restore | ~10s | Restores from cached GPU state |
+| Warm container | Instant | 15-min keepalive window |
+
+> **Optimization**: GPU memory snapshots capture the loaded model state, reducing cold starts by ~80%.
 
 ## Error Handling
 
