@@ -89,6 +89,10 @@ SUPPORTED_SIZES: tuple[str, ...] = ("480*832", "832*480", "720*1280", "1280*720"
 #: Maximum number of frames supported (approximately 1 minute at 16fps).
 MAX_FRAMES: int = 961
 
+#: Snapshot version key - change this to invalidate GPU memory snapshot cache.
+#: Increment when model loading code changes to force new snapshot creation.
+SNAPSHOT_KEY: str = "v2-h100-gpu"
+
 # =============================================================================
 # Modal Application Configuration
 # =============================================================================
@@ -257,12 +261,12 @@ def download_model() -> str:
         str(MODEL_DIR): model_volume,
         str(OUTPUTS_DIR): outputs_volume,
     },
-    gpu="A100-80GB",
-    timeout=30 * 60,
+    gpu="H100",
+    timeout=60 * 60,  # 60 minutes for long video generation
     scaledown_window=15 * 60,
     secrets=[modal.Secret.from_name("huggingface-token")],
-    # GPU memory snapshot for faster cold starts (~10s vs ~90s)
-    # Requires both flags per Modal docs: https://modal.com/docs/guide/memory-snapshot
+    # GPU-only memory snapshot for faster cold starts
+    # Skip CPU snapshot phase - directly snapshot GPU state
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
 )
@@ -370,31 +374,49 @@ class LingBotWorld:
         The 15-minute scaledown window helps minimize cold starts by
         keeping containers warm between requests.
         """
+        import logging
         import sys
 
         import torch
 
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s | %(levelname)-8s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        logger = logging.getLogger("lingbot_world")
+
         self.model_path = MODEL_DIR / "lingbot-world-nf4"
+
+        logger.info(f"Snapshot key: {SNAPSHOT_KEY}")
+        logger.info(f"Model path: {self.model_path}")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+
+        # Verify CUDA is available before proceeding
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA is not available. This function requires GPU. "
+                "Ensure gpu='H100' is set in the Modal decorator."
+            )
+
         self.device = torch.device("cuda:0")
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
         # Add model source to Python path for imports
         sys.path.insert(0, str(self.model_path))
 
-        print(f"Model path: {self.model_path}")
-        print(f"CUDA available: {torch.cuda.is_available()}")
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-
         # Import and initialize the pre-quantized pipeline
         from generate_prequant import WanI2V_PreQuant
 
-        print("Loading WanI2V_PreQuant pipeline...")
+        logger.info("Loading WanI2V_PreQuant pipeline...")
         self.pipeline = WanI2V_PreQuant(
             checkpoint_dir=str(self.model_path),
             device_id=0,
         )
 
-        print("Pipeline loaded successfully!")
+        logger.info("Pipeline loaded successfully!")
 
     @modal.method()
     def generate(

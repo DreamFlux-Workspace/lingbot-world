@@ -41,6 +41,7 @@ def cmd_setup(_args: argparse.Namespace) -> int:
     Returns
     -------
     int
+
         Exit code.
     """
     print("=" * 60)
